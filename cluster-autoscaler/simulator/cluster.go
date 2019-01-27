@@ -23,6 +23,8 @@ import (
 	"math/rand"
 	"time"
 
+	"k8s.io/autoscaler/cluster-autoscaler/utils/gpu"
+
 	"k8s.io/autoscaler/cluster-autoscaler/utils/drain"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/glogx"
@@ -62,7 +64,8 @@ type NodeToBeRemoved struct {
 type UtilizationInfo struct {
 	CpuUtil float64
 	MemUtil float64
-	// Max(CpuUtil, MemUtil).
+	GpuUtil float64
+	// Max(CpuUtil, MemUtil) or GpuUtils
 	Utilization float64
 }
 
@@ -149,10 +152,20 @@ func FindEmptyNodesToRemove(candidates []*apiv1.Node, pods []*apiv1.Pod) []*apiv
 	return result
 }
 
-// CalculateUtilization calculates utilization of a node, defined as maximum of (cpu, memory) utilization.
-// Per resource utilization is the sum of requests for it divided by allocatable. It also returns the individual
-// cpu and memory utilization.
+// CalculateUtilization calculates utilization of a node, defined as maximum of (cpu, memory) or gpu utilization
+// based on if the node has GPU or not. Per resource utilization is the sum of requests for it divided by allocatable.
+// It also returns the individual cpu, memory and gpu utilization.
 func CalculateUtilization(node *apiv1.Node, nodeInfo *schedulernodeinfo.NodeInfo, skipDaemonSetPods, skipMirrorPods bool) (utilInfo UtilizationInfo, err error) {
+	// Skips cpu and memory utilization calculation for node with GPU.
+	if gpu.NodeHasGpu(node) {
+		gpu, err := calculateUtilizationOfResource(node, nodeInfo, gpu.ResourceNvidiaGPU, skipDaemonSetPods, skipMirrorPods)
+		if err != nil {
+			return UtilizationInfo{}, err
+		}
+
+		return UtilizationInfo{GpuUtil: gpu, Utilization: gpu}, nil
+	}
+
 	cpu, err := calculateUtilizationOfResource(node, nodeInfo, apiv1.ResourceCPU, skipDaemonSetPods, skipMirrorPods)
 	if err != nil {
 		return UtilizationInfo{}, err
@@ -167,7 +180,7 @@ func CalculateUtilization(node *apiv1.Node, nodeInfo *schedulernodeinfo.NodeInfo
 func calculateUtilizationOfResource(node *apiv1.Node, nodeInfo *schedulernodeinfo.NodeInfo, resourceName apiv1.ResourceName, skipDaemonSetPods, skipMirrorPods bool) (float64, error) {
 	nodeAllocatable, found := node.Status.Allocatable[resourceName]
 	if !found {
-		return 0, fmt.Errorf("failed to get %v from %s", resourceName, node.Name)
+		return 0, fmt.Errorf("Failed to get %v from %s, resource is not ready yet", resourceName, node.Name)
 	}
 	if nodeAllocatable.MilliValue() == 0 {
 		return 0, fmt.Errorf("%v is 0 at %s", resourceName, node.Name)

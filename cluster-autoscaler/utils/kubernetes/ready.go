@@ -72,3 +72,15 @@ func GetReadinessState(node *apiv1.Node) (isNodeReady bool, lastTransitionTime t
 	}
 	return canNodeBeReady, lastTransitionTime, nil
 }
+
+// GetLastTransitionTimeOfUnreadyNode return lastTransitionTime of unready node
+func GetLastTransitionTimeOfUnreadyNode(node *apiv1.Node) (time.Time, error) {
+	var lastTransitionTime time.Time
+	for _, cond := range node.Status.Conditions {
+		if cond.Type == apiv1.NodeReady && cond.Status == apiv1.ConditionFalse {
+			return cond.LastTransitionTime.Time, nil
+		}
+	}
+
+	return lastTransitionTime, fmt.Errorf("LastTransitionTime of Unready Node not found")
+}

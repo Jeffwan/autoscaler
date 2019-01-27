@@ -227,6 +227,36 @@ func calculateScaleDownGpusTotal(nodes []*apiv1.Node, cp cloudprovider.CloudProv
 	return result, nil
 }
 
+// skipUtilizationCalculationForUnreadyNode checks if a node should be skipped calucating utilization.
+func (sd *ScaleDown) skipUtilizationCalculationForUnreadyNode(node *apiv1.Node, timestamp time.Time) bool {
+	ready, _, _ := kube_util.GetReadinessState(node)
+	if !ready {
+		if val, found := sd.unreadyNodes[node.Name]; !found {
+			if lastTransitionTime, err := kube_util.GetLastTransitionTimeOfUnreadyNode(node); err != nil {
+				klog.Warningf("Could not find lastTransitionTime for unready node %s, use current timestamp instead", node.Name)
+				sd.unreadyNodes[node.Name] = timestamp
+			} else {
+				sd.unreadyNodes[node.Name] = lastTransitionTime
+			}
+		} else {
+			sd.unreadyNodes[node.Name] = val
+		}
+
+		beginTime := sd.unreadyNodes[node.Name]
+		if beginTime.Add(sd.context.ScaleDownUnreadyTime).After(timestamp) {
+			return true
+		}
+		// Copy unready node info in unneededNodes map. Otherwise, CA has to wait another ScaleDownUnreadyTime
+		sd.unneededNodes[node.Name] = beginTime
+	} else {
+		if _, found := sd.unreadyNodes[node.Name]; found {
+			delete(sd.unreadyNodes, node.Name)
+		}
+	}
+
+	return false
+}
+
 func isNodeBeingDeleted(node *apiv1.Node, timestamp time.Time) bool {
 	deleteTime, _ := deletetaint.GetToBeDeletedTime(node)
 	return deleteTime != nil && (timestamp.Sub(*deleteTime) < MaxCloudProviderNodeDeletionTime || timestamp.Sub(*deleteTime) < MaxKubernetesEmptyNodeDeletionTime)
@@ -308,6 +338,7 @@ type ScaleDown struct {
 	unneededNodes        map[string]time.Time
 	unneededNodesList    []*apiv1.Node
 	unremovableNodes     map[string]time.Time
+	unreadyNodes         map[string]time.Time
 	podLocationHints     map[string]string
 	nodeUtilizationMap   map[string]simulator.UtilizationInfo
 	usageTracker         *simulator.UsageTracker
@@ -321,6 +352,7 @@ func NewScaleDown(context *context.AutoscalingContext, clusterStateRegistry *clu
 		clusterStateRegistry: clusterStateRegistry,
 		unneededNodes:        make(map[string]time.Time),
 		unremovableNodes:     make(map[string]time.Time),
+		unreadyNodes:         make(map[string]time.Time),
 		podLocationHints:     make(map[string]string),
 		nodeUtilizationMap:   make(map[string]simulator.UtilizationInfo),
 		usageTracker:         simulator.NewUsageTracker(),
@@ -363,6 +395,7 @@ func (sd *ScaleDown) UpdateUnneededNodes(
 	utilizationMap := make(map[string]simulator.UtilizationInfo)
 
 	sd.updateUnremovableNodes(nodes)
+	sd.updateUnreadyNodes(nodes)
 	// Filter out nodes that were recently checked
 	filteredNodesToCheck := make([]*apiv1.Node, 0)
 	for _, node := range nodesToCheck {
@@ -402,6 +435,12 @@ func (sd *ScaleDown) UpdateUnneededNodes(
 			klog.Errorf("Node info for %s not found", node.Name)
 			continue
 		}
+
+		if sd.skipUtilizationCalculationForUnreadyNode(node, timestamp) {
+			klog.V(1).Infof("Skip utilization calculation for unready Node %s, duration %s", node.Name, timestamp.Sub(sd.unreadyNodes[node.Name]).String())
+			continue
+		}
+
 		utilInfo, err := simulator.CalculateUtilization(node, nodeInfo, sd.context.IgnoreDaemonSetsUtilization, sd.context.IgnoreMirrorPodsUtilization)
 
 		if err != nil {
@@ -410,10 +449,10 @@ func (sd *ScaleDown) UpdateUnneededNodes(
 		klog.V(4).Infof("Node %s - utilization %f", node.Name, utilInfo.Utilization)
 		utilizationMap[node.Name] = utilInfo
 
-		if utilInfo.Utilization >= sd.context.ScaleDownUtilizationThreshold {
-			klog.V(4).Infof("Node %s is not suitable for removal - utilization too big (%f)", node.Name, utilInfo.Utilization)
+		if !sd.isNodeBelowUtilzationThreshold(node, utilInfo) {
 			continue
 		}
+
 		currentlyUnneededNodes = append(currentlyUnneededNodes, node)
 	}
 
@@ -504,6 +543,45 @@ func (sd *ScaleDown) UpdateUnneededNodes(
 	sd.clusterStateRegistry.UpdateScaleDownCandidates(sd.unneededNodesList, timestamp)
 	metrics.UpdateUnneededNodesCount(len(sd.unneededNodesList))
 	return nil
+}
+
+// isNodeBelowUtilzationThreshold determintes if a given node utilization is blow threshold.
+func (sd *ScaleDown) isNodeBelowUtilzationThreshold(node *apiv1.Node, utilInfo simulator.UtilizationInfo) bool {
+	if gpu.NodeHasGpu(node) {
+		if utilInfo.Utilization >= sd.context.ScaleDownGpuUtilizationThreshold {
+			klog.V(4).Infof("Node %s is not suitable for removal - GPU utilization too big (%f)", node.Name, utilInfo.Utilization)
+			return false
+		}
+	} else {
+		if utilInfo.Utilization >= sd.context.ScaleDownUtilizationThreshold {
+			klog.V(4).Infof("Node %s is not suitable for removal - utilization too big (%f)", node.Name, utilInfo.Utilization)
+			return false
+		}
+	}
+	return true
+}
+
+// updateUnreadyNodes updates unreadyNodes map according to current
+// state of the cluster. Removes from the map nodes that are no longer in the
+// nodes list.
+func (sd *ScaleDown) updateUnreadyNodes(nodes []*apiv1.Node) {
+	if len(sd.unreadyNodes) <= 0 {
+		return
+	}
+	// A set of nodes to delete from unreadyNodes map.
+	nodesToDelete := make(map[string]struct{}, len(sd.unreadyNodes))
+	for name := range sd.unreadyNodes {
+		nodesToDelete[name] = struct{}{}
+	}
+	// Nodes that are in the cluster should not be deleted.
+	for _, node := range nodes {
+		if _, ok := nodesToDelete[node.Name]; ok {
+			delete(nodesToDelete, node.Name)
+		}
+	}
+	for nodeName := range nodesToDelete {
+		delete(sd.unreadyNodes, nodeName)
+	}
 }
 
 // updateUnremovableNodes updates unremovableNodes map according to current

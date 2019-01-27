@@ -74,6 +74,21 @@ func TestUtilization(t *testing.T) {
 	utilInfo, err = CalculateUtilization(node, nodeInfo, false, false)
 	assert.NoError(t, err)
 	assert.InEpsilon(t, 2.0/10, utilInfo.Utilization, 0.01)
+
+	gpuNode := BuildTestNode("gpu_node", 2000, 2000000)
+	AddGpusToNode(gpuNode, 1)
+	gpuPod := BuildTestPod("gpu_pod", 100, 200000)
+	RequestGpuForPod(gpuPod, 1)
+	nodeInfo = schedulernodeinfo.NewNodeInfo(pod, pod, gpuPod)
+	utilInfo, err = CalculateUtilization(gpuNode, nodeInfo, false, false)
+	assert.NoError(t, err)
+	assert.InEpsilon(t, 1/1, utilInfo.Utilization, 0.01)
+
+	gpuNode = BuildTestNode("gpu_node", 2000, 2000000)
+	AddGpuLabelToNode(gpuNode)
+	nodeInfo = schedulernodeinfo.NewNodeInfo(pod, pod)
+	_, err = CalculateUtilization(gpuNode, nodeInfo, false, false)
+	assert.Error(t, err)
 }
 
 func TestFindPlaceAllOk(t *testing.T) {
