@@ -877,6 +877,9 @@ func (sd *ScaleDown) deleteNode(node *apiv1.Node, pods []*apiv1.Pod) errors.Auto
 	}
 	drainSuccessful = true
 
+	time.Sleep(20 * time.Second)
+	glog.V(0).Infof("Scale-down: Sleep 20 seconds before CloudProvider remove node %s", node.Name)
+
 	// attempt delete from cloud provider
 	err := deleteNodeFromCloudProvider(node, sd.context.CloudProvider, sd.context.Recorder, sd.clusterStateRegistry)
 	if err != nil {
