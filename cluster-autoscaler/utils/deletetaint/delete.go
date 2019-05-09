@@ -73,6 +73,7 @@ func addToBeDeletedTaint(node *apiv1.Node) (bool, error) {
 			return false, nil
 		}
 	}
+	node.Spec.Unschedulable = true
 	node.Spec.Taints = append(node.Spec.Taints, apiv1.Taint{
 		Key:    ToBeDeletedTaint,
 		Value:  fmt.Sprint(time.Now().Unix()),
@@ -124,6 +125,7 @@ func CleanToBeDeleted(node *apiv1.Node, client kube_client.Interface) (bool, err
 		}
 
 		if len(newTaints) != len(freshNode.Spec.Taints) {
+			freshNode.Spec.Unschedulable = true
 			freshNode.Spec.Taints = newTaints
 			_, err := client.CoreV1().Nodes().Update(freshNode)
 
