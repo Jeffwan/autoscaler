@@ -1002,6 +1002,8 @@ func cleanToBeDeleted(nodes []*apiv1.Node, client kube_client.Interface, recorde
 // the Kubernetes side.
 func deleteNodeFromCloudProvider(node *apiv1.Node, cloudProvider cloudprovider.CloudProvider,
 	recorder kube_record.EventRecorder, registry *clusterstate.ClusterStateRegistry) errors.AutoscalerError {
+	glog.V(0).Infof("Scale-down: Sleep 150 seconds before CloudProvider remove node %s", node.Name)
+	time.Sleep(150 * time.Second)
 	nodeGroup, err := cloudProvider.NodeGroupForNode(node)
 	if err != nil {
 		return errors.NewAutoscalerError(
